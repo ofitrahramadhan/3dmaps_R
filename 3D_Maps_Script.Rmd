@@ -14,7 +14,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r packages, include=FALSE}
 
 #libraries we need
-libs <- c('tidyverse','sf','giscoR','classInt','exactextractr','terra','rayshader')
+libs <- c('tidyverse','sf','janitor','classInt','tmaptools','spdep','rayshader','here','tmap', 'ggplot2', 'extrafont')
 
 #install missing libraries
 installed_libs <- libs %in% rownames(installed.packages())
@@ -33,93 +33,84 @@ checkVersion <- function(packages) {
 invisible(lapply(libs, checkVersion))
 ```
 
-### Get Hexagonal Grid of Brazil
+### Get Hexagonal Grid of London
 
 ```{r}
 
-brazil <- giscoR::gisco_get_countries(
-  year = '2016',
-  epsg = '4326',
-  resolution = '10',
-  country = 'Brazil') %>%
-  st_transform(3575)
+london <- st_read('https://www.dropbox.com/scl/fi/qmuuncr9luoguae5wa6ho/neighbourhoods.geojson?rlkey=rflewdp5df2am8ydpstessz20&dl=1') %>% st_transform(27700)
 ```
 
 ```{r}
 
-brazil_hex <- st_make_grid(brazil,
-                           cellsize = 30000,
+london_hex <- st_make_grid(london,
+                           cellsize = 1000,
                            what = 'polygon',
                            square = F) %>%
-  st_intersection(brazil) %>%
+  st_intersection(london) %>%
   st_sf() %>%
   mutate(id = row_number()) %>% 
   filter(st_geometry_type(.) %in% c("POLYGON", "MULTIPOLYGON")) %>%
   st_cast("MULTIPOLYGON")
+```
+
+### Airbnb Data
+
+```{r}
+
+airbnb <- readr::read_csv('https://www.dropbox.com/scl/fi/zrr90ju1ir8h56hbf079n/listings.csv?rlkey=673iaen39g7qdqopr47nvc9qy&dl=1') 
+
+airbnb <- st_as_sf(airbnb, coords=c('longitude', 'latitude'), crs=4326) %>% st_transform(27700)
+
+airbnb <- airbnb[london_hex,]
+```
+
+```{r}
+
+tmap_mode('plot')
+
+tm_shape(london_hex) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(airbnb) +
+  tm_dots(col = 'blue')
+```
+
+```{r}
+
+airbnb <- airbnb %>%
+  dplyr::select(., price) %>%
+  dplyr::mutate(price = sub("\\$","", price)) %>%
+  dplyr::mutate(price = as.numeric(price))
 
 ```
 
 ```{r}
 
-crsLONGLAT <- "+proj=longlat +datum=WGS84 +no_defs"
-brazil_sf <- st_transform(brazil_hex, crs = crsLONGLAT)
-```
-
-### Forest Data
-
-```{r}
-
-url <- c("/vsicurl/https://glad.geog.umd.edu/Potapov/Forest_height_2019/Forest_height_2019_SAM.tif")
-
-forests <- rast(url)
-```
-
-```{r}
-plot(forests)
+mean_price_hex <- airbnb %>% st_join(., london_hex)
+mean_price_hex <- mean_price_hex %>%
+  dplyr::group_by(id) %>%
+  dplyr::summarize(mean = mean(price, na.rm=TRUE))
 ```
 
 ```{r}
 
-brazil_forest <-  forests
-brazil_ext <- st_bbox(brazil_sf) %>% as.vector()
-ext(brazil_forest) <- brazil_ext
-br_forest <- terra::aggregate(brazil_forest, fact=5)
-```
+london_hex <- london_hex %>%
+  st_join(., mean_price_hex, by='id') 
 
-```{r}
-plot(br_forest)
-```
-
-### Zonal Statistic
-
-```{r}
-
-br_forest_clamp <- ifel(br_forest > 100, 0, br_forest)
-brazil_df  <- exact_extract(br_forest_clamp, brazil_sf, "mean")
-br_df <- as.data.frame(brazil_df)
-br_df$id <- 1:max(nrow(br_df))
-```
-
-### Merge 
-
-```{r}
-
-f <- left_join(br_df, brazil_sf, by="id") %>% # join with transformed sf object
-      st_as_sf() %>%
-      filter(!st_is_empty(.)) #remove null features
-
-names(f)[1] <- "val"
-f$val[is.na(f$val)] <- 0
-
+london_hex <- london_hex %>% 
+  clean_names %>%
+  dplyr::select(id = id_x, mean) %>%
+  dplyr::mutate(mean = ifelse(is.na(mean), 0, mean))
 
 ```
 
+### Visualization
+
 ```{r}
 
-vmin <- min(f$val, na.rm=T)
-vmax <- max(f$val, na.rm=T)
+vmin <- min(london_hex$mean, na.rm=T)
+vmax <- max(london_hex$mean, na.rm=T)
 
-brk <- round(classIntervals(f$val, 
+brk <- round(classIntervals(london_hex$mean, 
                             n = 6, 
                             style = 'fisher')$brks, 1) %>%
   head(-1) %>%
@@ -129,7 +120,7 @@ brk <- round(classIntervals(f$val,
 breaks <- c(vmin, brk)
 all_breaks <- list(vmin, vmax, breaks)
 
-cols = rev(c("#1b3104", "#386c2e", "#498c44", "#5bad5d", "#8dc97f", "#c4e4a7"))
+cols = rev(c("#8F0909", "#FF1C1C", "#FF5446", "#FF8773", "#FFB6A6", "white"))
 newcol <- colorRampPalette(cols)
 ncols <- 6
 cols2 <- newcol(ncols)
@@ -138,9 +129,9 @@ cols2 <- newcol(ncols)
 ```{r}
 
 
-p <- ggplot(f) +
-  geom_sf(aes(fill = val), color = NA, size=0) +
-  scale_fill_gradientn(name="In meters",
+p <- ggplot(london_hex) +
+  geom_sf(aes(fill = mean), color = NA, size=0) +
+  scale_fill_gradientn(name="In USD ($)",
                        colours=cols2,
                        breaks=breaks,
                        labels=round(breaks, 1),
@@ -155,23 +146,23 @@ p <- ggplot(f) +
                            byrow = T,
                            reverse = F,
                            label.position = "left")) +
-  coord_sf(crs = crsLONGLAT)+
+  coord_sf(crs = 4326)+
   theme_minimal() +
-  theme(text = element_text(family = "georg", color = "#22211d"),
+  theme(text = element_text(family = "Arial", color = "#22211d"),
         axis.line = element_blank(),
         axis.text.x = element_blank(),
         axis.text.y = element_blank(),
         axis.ticks = element_blank(),
         axis.title.x = element_blank(),
         axis.title.y = element_blank(),
-        legend.position = c(0.8, .1),
+        legend.position = c(0.9, .1),
         legend.text = element_text(size=6, color="white"),
         legend.title = element_text(size=8, color="white"),
         panel.grid.major = element_line(color = "grey60", size = 0.2),
         panel.grid.minor = element_blank(),
-        plot.title = element_text(size=14, color="#498c44", hjust=1, face="bold", vjust=-1),
+        plot.title = element_text(size=12, color="white", hjust=1, face="bold", vjust=-1),
         plot.caption = element_text(size=6, color="white", hjust=.15, vjust=20),
-        plot.subtitle = element_text(size=12, color="#498c44", hjust=1),
+        plot.subtitle = element_text(size=12, color="white", hjust=1),
         plot.margin = unit(c(t=0, r=0, b=0, l=0),"lines"),
         plot.background = element_rect(fill = "grey60", color = NA), 
         panel.background = element_rect(fill = "grey60", color = NA), 
@@ -179,9 +170,9 @@ p <- ggplot(f) +
         panel.border = element_blank())+
   labs(x = "", 
        y = NULL, 
-       title = "Average forest cover height in Brazil", 
-       subtitle = expression(paste("per 30,000", m^{2}, "of land area")), 
-       caption = "©2022 Milos Popovic (https://milospopovic.net)\n Data: https://glad.umd.edu/dataset")
+       title = "Mean Rent Price per Night of Airbnb in London 2019", 
+       subtitle = expression(paste("per 1 ", km^{2}, "of land area")), 
+       caption = "Inspiration from Milos Popovic (2022)\n Data: insideairbnb.com")
 ```
 
 ```{r}
@@ -204,5 +195,5 @@ plot_gg(p,
   phi = 30, 
   theta = -30)
 
-render_snapshot("brazil_forest_height_2019.png", clear=T)
+render_snapshot("airbnb_meanprice_2019.png", clear=T)
 ```
